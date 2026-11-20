@@ -59,6 +59,9 @@ next_connection_delay_ms = 1
 #     capath = "/etc/tls/ca.cert.pem"
 #     certpath = "/etc/tls/server.cert.pem"
 #     keypath = "/etc/tls/server.key.pem"
+#     # key exchange: "default" | "prefer-post-quantum" | "post-quantum-only"
+#     # "post-quantum-only" forces TLS 1.3 with hybrid X25519MLKEM768 (ML-KEM-768 + X25519)
+#     key_exchange = "post-quantum-only"
 #     # settings for all the connections on this server
 #     [v4.2.connections]
 #     connection_timeout_ms = 60000

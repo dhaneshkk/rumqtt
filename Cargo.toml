@@ -2,6 +2,7 @@
 members = [
   "rumqttc",
   "rumqttd",
+  "pq-envelope",
   "benchmarks",
   "benchmarks/simplerouter",
 ]

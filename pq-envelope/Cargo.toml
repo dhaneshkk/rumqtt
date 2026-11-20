@@ -1,0 +1,22 @@
+[package]
+name = "rumqtt-pq-envelope"
+version = "0.1.0"
+publish = false
+description = "End-to-end post-quantum envelope for MQTT payloads (ML-KEM-768 + X25519 hybrid, ML-DSA-65)"
+keywords = ["mqtt", "post-quantum", "ml-kem", "ml-dsa"]
+categories = ["cryptography", "network-programming"]
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+aws-lc-rs = "1.19"
+thiserror = "1.0.57"
+
+[dev-dependencies]
+rumqttd = { path = "../rumqttd", default-features = false, features = ["use-rustls", "verify-client-cert"] }
+rumqttc = { path = "../rumqttc" }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "crypto"] }
+tokio = { version = "1", features = ["full"] }
+config = { version = "0.14", default-features = false, features = ["toml"] }
