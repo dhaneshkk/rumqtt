@@ -66,7 +66,10 @@ pub fn free_port() -> u16 {
 /// Start rumqttd with one TLS listener per (port, key_exchange) pair.
 /// `proto` is `"v4"` (MQTT 3.1.1) or `"v5"` (MQTT 5).
 pub fn start_broker(pki: &Pki, proto: &str, listeners: &[(u16, &str)]) {
-    let d = pki.dir.display();
+    // TOML literal ('single-quoted') strings: no escape processing, so Windows paths
+    // like C:\Users\... are taken verbatim.
+    let path = |f: &str| pki.dir.join(f).display().to_string();
+    let (ca, cert, key) = (path("ca.pem"), path("server.pem"), path("server.key"));
     let mut toml = String::from(
         "id = 0\n[router]\nid = 0\nmax_connections = 100\nmax_outgoing_packet_count = 200\n\
          max_segment_size = 104857600\nmax_segment_count = 10\n",
@@ -74,8 +77,8 @@ pub fn start_broker(pki: &Pki, proto: &str, listeners: &[(u16, &str)]) {
     for (i, (port, kx)) in listeners.iter().enumerate() {
         toml += &format!(
             "[{proto}.{i}]\nname = \"pq-{i}\"\nlisten = \"127.0.0.1:{port}\"\nnext_connection_delay_ms = 1\n\
-             [{proto}.{i}.tls]\ncapath = \"{d}/ca.pem\"\ncertpath = \"{d}/server.pem\"\n\
-             keypath = \"{d}/server.key\"\nkey_exchange = \"{kx}\"\n\
+             [{proto}.{i}.tls]\ncapath = '{ca}'\ncertpath = '{cert}'\n\
+             keypath = '{key}'\nkey_exchange = \"{kx}\"\n\
              [{proto}.{i}.connections]\nconnection_timeout_ms = 60000\nmax_payload_size = 65536\n\
              max_inflight_count = 100\ndynamic_filters = true\n"
         );
