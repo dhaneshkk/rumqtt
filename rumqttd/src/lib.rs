@@ -275,6 +275,13 @@ pub enum Transport {
     Tls {
         ca: PathBuf,
         client_auth: Option<ClientAuth>,
+        /// Key-exchange policy for the bridge's outgoing TLS connection.
+        #[serde(default)]
+        key_exchange: KeyExchange,
+        /// Signature policy: with `post-quantum-only` the remote broker's certificate chain
+        /// must be ML-DSA, and so must the bridge's own client certificate (if any).
+        #[serde(default)]
+        signatures: SignaturePolicy,
     },
 }
 

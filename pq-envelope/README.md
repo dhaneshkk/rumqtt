@@ -31,6 +31,17 @@ signatures   = "post-quantum-only"   # ML-DSA certificates only (post-quantum lo
 | `signatures` | `default` | ECDSA, Ed25519, RSA and ML-DSA |
 | | `post-quantum-only` | ML-DSA only for certificate chains and CertificateVerify; the listener refuses to start without an ML-DSA server key |
 
+The same two options apply to every TLS path of rumqttd: `[v4.x]` / `[v5.x]` listeners,
+secure websocket listeners (`[ws.x]` with `tls`), and the bridge's outgoing connection:
+
+```toml
+[bridge.transport.tls]
+ca = "ca.cert.pem"
+client_auth = { certs = "bridge.cert.pem", key = "bridge.key.pem" }  # ML-DSA for PQ-only
+key_exchange = "post-quantum-only"
+signatures   = "post-quantum-only"
+```
+
 ML-DSA certificates can be issued with rcgen (`PKCS_ML_DSA_65`, `aws_lc_rs` feature) or
 OpenSSL >= 3.5 (`openssl req -newkey mldsa65 ...`). Client side:
 `rumqttc/examples/tls_post_quantum.rs` (`PQ_AUTH=1` for ML-DSA-only verification).
@@ -135,7 +146,8 @@ let ops = dir.recipient("ops-dashboard").unwrap();           // look up recipien
 | `keys` | 52 certificate cases: issue, rotate, downgrade, conflict, wrong issuer, tampered, expired, not-yet-valid, stale/rogue CRL; directory-driven openers | MCC 1.0 |
 | `end_to_end` / `end_to_end_v5` | rumqttd PQ-only mTLS + envelope over MQTT 3.1.1 / 5 (user properties) | MCC 1.0 |
 | `session_e2e_v5` | retained group handshake, 3 readers incl. late joiner, retained frame, publisher reboot, replayed handshake | pass |
-| `pq_logins` | ML-DSA-65 mutual TLS; ECDSA client/server refused under `signatures = "post-quantum-only"`; misconfigured listener refuses to start | pass |
+| `pq_logins` | ML-DSA-65 mutual TLS; ECDSA client/server refused under `signatures = "post-quantum-only"`; misconfigured listener never binds | pass |
+| `pq_bridge_ws` | bridge end to end over PQ-only ML-DSA mTLS between two brokers; bridge refuses classical-only key exchange, ECDSA server certs and an ECDSA client key under `post-quantum-only`; secure websockets enforce both policies | pass |
 
 `lean lean/HybridCombiner.lean` (Lean 4 core, no Mathlib, no `sorry`, axioms printed):
 combiner injectivity in each secret (TLS hybrid and X-Wing's context), KDF binding,
@@ -149,8 +161,6 @@ runs all of the above.
 
 ## Not covered
 
-* The rumqttd bridge client and websocket listeners don't take `key_exchange` /
-  `signatures` yet.
 * HPKE comes from the pure-Rust `hpke` / `x-wing` crates (not FIPS-validated); TLS and
   ML-DSA use aws-lc-rs.
 * Group members can impersonate the sender to each other in session mode (see above).

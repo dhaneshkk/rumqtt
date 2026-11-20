@@ -216,10 +216,14 @@ async fn ml_dsa_mutual_tls_logins() {
         handshake(&mut e3).await,
         true,
     );
-    // C: listener with ECDSA server key + PQ-only policy refuses to start.
+    // C: listener with ECDSA server key + PQ-only policy refuses to start (never binds).
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", c)).is_err(),
+        "listener C must not bind"
+    );
     let (_c4, mut e4) = client(&ca_der, &cli_pq, c, false, "c4");
     run(
-        "C ECDSA server key with PQ-only policy (listener down)",
+        "C ECDSA server key with PQ-only policy (listener not started)",
         handshake(&mut e4).await,
         false,
     );

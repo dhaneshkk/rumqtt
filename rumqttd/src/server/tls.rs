@@ -294,7 +294,7 @@ pub(crate) fn crypto_provider(policy: KeyExchange) -> CryptoProvider {
 }
 
 #[cfg(feature = "use-rustls")]
-const PQ_SCHEMES: &[tokio_rustls::rustls::SignatureScheme] = &[
+pub(crate) const PQ_SCHEMES: &[tokio_rustls::rustls::SignatureScheme] = &[
     tokio_rustls::rustls::SignatureScheme::ML_DSA_44,
     tokio_rustls::rustls::SignatureScheme::ML_DSA_65,
     tokio_rustls::rustls::SignatureScheme::ML_DSA_87,
