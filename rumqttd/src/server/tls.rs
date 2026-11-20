@@ -7,9 +7,9 @@ use {
     tokio_native_tls::native_tls::Error as NativeTlsError,
 };
 
-#[cfg(feature = "use-rustls")]
-use crate::KeyExchange;
 use crate::TlsConfig;
+#[cfg(feature = "use-rustls")]
+use crate::{KeyExchange, SignaturePolicy};
 #[cfg(feature = "verify-client-cert")]
 use tokio_rustls::rustls::{server::WebPkiClientVerifier, RootCertStore};
 #[cfg(feature = "use-rustls")]
@@ -57,6 +57,8 @@ pub enum Error {
     RustlsNotEnabled,
     #[error("Invalid tenant id = {0}")]
     InvalidTenantId(String),
+    #[error("signatures = \"post-quantum-only\" requires an ML-DSA server key ({0})")]
+    NotPostQuantumKey(String),
     #[error("Invalid tenant certificate")]
     InvalidTenant,
     #[error("Tenant id missing in certificate")]
@@ -109,7 +111,8 @@ impl TLSAcceptor {
                 certpath,
                 keypath,
                 key_exchange,
-            } => Self::rustls(capath, certpath, keypath, *key_exchange),
+                signatures,
+            } => Self::rustls(capath, certpath, keypath, *key_exchange, *signatures),
             #[cfg(feature = "use-native-tls")]
             TlsConfig::NativeTls {
                 pkcs12path,
@@ -193,6 +196,7 @@ impl TLSAcceptor {
         cert_path: &String,
         key_path: &String,
         key_exchange: KeyExchange,
+        signatures: SignaturePolicy,
     ) -> Result<TLSAcceptor, Error> {
         #[cfg(feature = "verify-client-cert")]
         let Some(ca_path) = ca_path
@@ -222,7 +226,15 @@ impl TLSAcceptor {
             (certs, key)
         };
 
-        let provider = Arc::new(crypto_provider(key_exchange));
+        let mut provider = crypto_provider(key_exchange);
+        if signatures == SignaturePolicy::PostQuantumOnly {
+            provider.signature_verification_algorithms = post_quantum_signatures();
+            let signing_key = provider.key_provider.load_private_key(key.clone_key())?;
+            if signing_key.choose_scheme(PQ_SCHEMES).is_none() {
+                return Err(Error::NotPostQuantumKey(key_path.clone()));
+            }
+        }
+        let provider = Arc::new(provider);
         let versions: &[&'static tokio_rustls::rustls::SupportedProtocolVersion] =
             match key_exchange {
                 KeyExchange::PostQuantumOnly => &[&tokio_rustls::rustls::version::TLS13],
@@ -281,6 +293,45 @@ pub(crate) fn crypto_provider(policy: KeyExchange) -> CryptoProvider {
     provider
 }
 
+#[cfg(feature = "use-rustls")]
+const PQ_SCHEMES: &[tokio_rustls::rustls::SignatureScheme] = &[
+    tokio_rustls::rustls::SignatureScheme::ML_DSA_44,
+    tokio_rustls::rustls::SignatureScheme::ML_DSA_65,
+    tokio_rustls::rustls::SignatureScheme::ML_DSA_87,
+];
+
+#[cfg(feature = "use-rustls")]
+/// The aws-lc-rs verification algorithms restricted to ML-DSA (built once, `'static`).
+pub(crate) fn post_quantum_signatures() -> tokio_rustls::rustls::crypto::WebPkiSupportedAlgorithms {
+    use std::sync::OnceLock;
+    use tokio_rustls::rustls::{
+        crypto::WebPkiSupportedAlgorithms, pki_types::SignatureVerificationAlgorithm,
+        SignatureScheme,
+    };
+    type Mapping = (
+        SignatureScheme,
+        &'static [&'static dyn SignatureVerificationAlgorithm],
+    );
+    static PQ: OnceLock<WebPkiSupportedAlgorithms> = OnceLock::new();
+    *PQ.get_or_init(|| {
+        let base = aws_lc_rs::default_provider().signature_verification_algorithms;
+        let mapping: Vec<Mapping> = base
+            .mapping
+            .iter()
+            .filter(|(s, _)| PQ_SCHEMES.contains(s))
+            .copied()
+            .collect();
+        let all: Vec<&'static dyn SignatureVerificationAlgorithm> = mapping
+            .iter()
+            .flat_map(|(_, a)| a.iter().copied())
+            .collect();
+        WebPkiSupportedAlgorithms {
+            all: Box::leak(all.into_boxed_slice()),
+            mapping: Box::leak(mapping.into_boxed_slice()),
+        }
+    })
+}
+
 #[cfg(all(test, feature = "use-rustls"))]
 mod tests {
     use super::*;
@@ -307,6 +358,14 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn post_quantum_signatures_are_ml_dsa_only() {
+        let algs = post_quantum_signatures();
+        let schemes: Vec<_> = algs.mapping.iter().map(|(s, _)| *s).collect();
+        assert_eq!(schemes, PQ_SCHEMES.to_vec());
+        assert_eq!(algs.all.len(), 3);
     }
 
     #[test]

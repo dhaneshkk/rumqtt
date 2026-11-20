@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Post-quantum authentication for rustls listeners: new `signatures` option in the `tls`
+  section (`"default"` | `"post-quantum-only"`). `"post-quantum-only"` accepts only ML-DSA
+  (FIPS 204) signatures for certificate chains and CertificateVerify, and refuses to start
+  the listener unless the server key is ML-DSA.
 - Post-quantum TLS key exchange for rustls listeners: new `key_exchange` option in the `tls`
   section (`"default"` | `"prefer-post-quantum"` | `"post-quantum-only"`), backed by the hybrid
   `X25519MLKEM768` group (ML-KEM-768 + X25519, RFC 10024) from aws-lc-rs.
@@ -15,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Debug log of the negotiated key-exchange group after each TLS handshake.
 
 ### Changed
+- Require `rustls >= 0.23.46` with `use-rustls` (ML-DSA signing keys and verification).
+- `TlsConfig::Rustls` gains a `signatures: SignaturePolicy` field (serde default `Default`).
 - Upgrade `tokio-rustls` to 0.26 (rustls 0.23, aws-lc-rs provider) and `rustls-webpki` to 0.103.
 - `TlsConfig::Rustls` gains a `key_exchange: KeyExchange` field (serde default `Default`);
   code that builds this variant with a struct literal must add the field.

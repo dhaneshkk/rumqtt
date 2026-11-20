@@ -97,6 +97,19 @@ pub enum KeyExchange {
     PostQuantumOnly,
 }
 
+/// Which signature algorithms a rustls listener accepts for authentication
+/// (certificate chains and the TLS 1.3 CertificateVerify proof).
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignaturePolicy {
+    /// rustls/aws-lc-rs defaults: ECDSA, Ed25519, RSA and ML-DSA.
+    #[default]
+    Default,
+    /// ML-DSA (FIPS 204) only: the server key must be ML-DSA and, with
+    /// `verify-client-cert`, client certificate chains must be ML-DSA signed.
+    PostQuantumOnly,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TlsConfig {
@@ -107,6 +120,9 @@ pub enum TlsConfig {
         /// Key-exchange policy, e.g. `key_exchange = "post-quantum-only"`.
         #[serde(default)]
         key_exchange: KeyExchange,
+        /// Authentication policy, e.g. `signatures = "post-quantum-only"`.
+        #[serde(default)]
+        signatures: SignaturePolicy,
     },
     NativeTls {
         pkcs12path: String,
