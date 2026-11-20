@@ -8,7 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Post-quantum TLS key exchange for rustls listeners: new `key_exchange` option in the `tls`
+  section (`"default"` | `"prefer-post-quantum"` | `"post-quantum-only"`), backed by the hybrid
+  `X25519MLKEM768` group (ML-KEM-768 + X25519, RFC 10024) from aws-lc-rs.
+  `"post-quantum-only"` also restricts the listener to TLS 1.3.
+- Debug log of the negotiated key-exchange group after each TLS handshake.
+
 ### Changed
+- Upgrade `tokio-rustls` to 0.26 (rustls 0.23, aws-lc-rs provider) and `rustls-webpki` to 0.103.
+- `TlsConfig::Rustls` gains a `key_exchange: KeyExchange` field (serde default `Default`);
+  code that builds this variant with a struct literal must add the field.
 ### Deprecated
 ### Removed
 ### Fixed 

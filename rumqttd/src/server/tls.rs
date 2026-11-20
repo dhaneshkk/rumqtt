@@ -7,6 +7,8 @@ use {
     tokio_native_tls::native_tls::Error as NativeTlsError,
 };
 
+#[cfg(feature = "use-rustls")]
+use crate::KeyExchange;
 use crate::TlsConfig;
 #[cfg(feature = "verify-client-cert")]
 use tokio_rustls::rustls::{server::WebPkiClientVerifier, RootCertStore};
@@ -14,7 +16,11 @@ use tokio_rustls::rustls::{server::WebPkiClientVerifier, RootCertStore};
 use {
     rustls_pemfile::Item,
     std::{io::BufReader, sync::Arc},
-    tokio_rustls::rustls::{pki_types::PrivateKeyDer, Error as RustlsError, ServerConfig},
+    tokio_rustls::rustls::{
+        crypto::{aws_lc_rs, CryptoProvider},
+        pki_types::PrivateKeyDer,
+        Error as RustlsError, ServerConfig,
+    },
     tracing::error,
 };
 
@@ -102,7 +108,8 @@ impl TLSAcceptor {
                 capath,
                 certpath,
                 keypath,
-            } => Self::rustls(capath, certpath, keypath),
+                key_exchange,
+            } => Self::rustls(capath, certpath, keypath, *key_exchange),
             #[cfg(feature = "use-native-tls")]
             TlsConfig::NativeTls {
                 pkcs12path,
@@ -120,6 +127,10 @@ impl TLSAcceptor {
             #[cfg(feature = "use-rustls")]
             TLSAcceptor::Rustls { acceptor } => {
                 let stream = acceptor.accept(stream).await?;
+                tracing::debug!(
+                    kx_group = ?stream.get_ref().1.negotiated_key_exchange_group().map(|g| g.name()),
+                    "TLS handshake complete"
+                );
 
                 #[cfg(feature = "verify-client-cert")]
                 let tenant_id = {
@@ -181,6 +192,7 @@ impl TLSAcceptor {
         ca_path: &Option<String>,
         cert_path: &String,
         key_path: &String,
+        key_exchange: KeyExchange,
     ) -> Result<TLSAcceptor, Error> {
         #[cfg(feature = "verify-client-cert")]
         let Some(ca_path) = ca_path
@@ -210,7 +222,14 @@ impl TLSAcceptor {
             (certs, key)
         };
 
-        let builder = ServerConfig::builder();
+        let provider = Arc::new(crypto_provider(key_exchange));
+        let versions: &[&'static tokio_rustls::rustls::SupportedProtocolVersion] =
+            match key_exchange {
+                KeyExchange::PostQuantumOnly => &[&tokio_rustls::rustls::version::TLS13],
+                _ => tokio_rustls::rustls::DEFAULT_VERSIONS,
+            };
+        let builder = ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(versions)?;
 
         // client authentication with a CA. CA isn't required otherwise
         #[cfg(feature = "verify-client-cert")]
@@ -230,7 +249,7 @@ impl TLSAcceptor {
             // This will only return an error if no trust anchors are provided or invalid CRLs are
             // provided. We always provide a trust anchor, and don't provide any CRLs, so it is safe
             // to unwrap.
-            let verifier = WebPkiClientVerifier::builder(Arc::new(store))
+            let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(store), provider)
                 .build()
                 .unwrap();
             builder.with_client_cert_verifier(verifier)
@@ -243,6 +262,64 @@ impl TLSAcceptor {
 
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
         Ok(TLSAcceptor::Rustls { acceptor })
+    }
+}
+
+#[cfg(feature = "use-rustls")]
+/// aws-lc-rs crypto provider with key-exchange groups ordered/filtered by `policy`.
+pub(crate) fn crypto_provider(policy: KeyExchange) -> CryptoProvider {
+    let mut provider = aws_lc_rs::default_provider();
+    let pq = aws_lc_rs::kx_group::X25519MLKEM768;
+    match policy {
+        KeyExchange::Default => {}
+        KeyExchange::PreferPostQuantum => {
+            provider.kx_groups.retain(|g| g.name() != pq.name());
+            provider.kx_groups.insert(0, pq);
+        }
+        KeyExchange::PostQuantumOnly => provider.kx_groups = vec![pq],
+    }
+    provider
+}
+
+#[cfg(all(test, feature = "use-rustls"))]
+mod tests {
+    use super::*;
+    use tokio_rustls::rustls::NamedGroup;
+
+    fn names(p: &CryptoProvider) -> Vec<NamedGroup> {
+        p.kx_groups.iter().map(|g| g.name()).collect()
+    }
+
+    #[test]
+    fn post_quantum_only_has_single_hybrid_group() {
+        let p = crypto_provider(KeyExchange::PostQuantumOnly);
+        assert_eq!(names(&p), vec![NamedGroup::X25519MLKEM768]);
+    }
+
+    #[test]
+    fn prefer_post_quantum_puts_hybrid_first_and_keeps_fallback() {
+        let n = names(&crypto_provider(KeyExchange::PreferPostQuantum));
+        assert_eq!(n[0], NamedGroup::X25519MLKEM768);
+        assert!(n.contains(&NamedGroup::X25519));
+        assert_eq!(
+            n.iter()
+                .filter(|g| **g == NamedGroup::X25519MLKEM768)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn key_exchange_deserializes_and_defaults() {
+        #[derive(serde::Deserialize)]
+        struct T {
+            #[serde(default)]
+            key_exchange: KeyExchange,
+        }
+        let t: T = serde_json::from_str(r#"{"key_exchange":"post-quantum-only"}"#).unwrap();
+        assert_eq!(t.key_exchange, KeyExchange::PostQuantumOnly);
+        let t: T = serde_json::from_str("{}").unwrap();
+        assert_eq!(t.key_exchange, KeyExchange::Default);
     }
 }
 

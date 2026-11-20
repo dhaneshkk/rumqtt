@@ -66,6 +66,11 @@ path = "examples/tls.rs"
 required-features = ["use-rustls"]
 
 [[example]]
+name = "tls_post_quantum"
+path = "examples/tls_post_quantum.rs"
+required-features = ["use-rustls"]
+
+[[example]]
 name = "tls_native"
 path = "examples/tls_native.rs"
 required-features = ["use-native-tls"]

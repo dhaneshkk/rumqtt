@@ -76,6 +76,9 @@ jobs:
         run: |
             cargo hack --each-feature --optional-deps url llvm-cov -p rumqttc -p rumqttd --no-report nextest
 
+      - name: Test post-quantum envelope (Layer 2) and PQ-TLS end-to-end
+        run: cargo test -p rumqtt-pq-envelope
+
       - name: Combine coverage
         run: cargo llvm-cov report --lcov --output-path coverage.lcov
 

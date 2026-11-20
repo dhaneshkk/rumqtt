@@ -76,6 +76,22 @@ pub struct PrometheusSetting {
 
 // TODO: Change names without _ until config-rs issue is resolved
 // https://github.com/mehcode/config-rs/issues/369
+/// TLS key-exchange policy for rustls listeners.
+///
+/// Post-quantum groups use the hybrid `X25519MLKEM768` (ML-KEM-768 + X25519, RFC 10024)
+/// from the aws-lc-rs crypto provider.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeyExchange {
+    /// rustls defaults for the aws-lc-rs provider (`X25519MLKEM768` is offered, not forced).
+    #[default]
+    Default,
+    /// Put `X25519MLKEM768` first, keep classical groups as a fallback for legacy clients.
+    PreferPostQuantum,
+    /// TLS 1.3 with `X25519MLKEM768` only. Clients without ML-KEM support are refused.
+    PostQuantumOnly,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TlsConfig {
@@ -83,6 +99,9 @@ pub enum TlsConfig {
         capath: Option<String>,
         certpath: String,
         keypath: String,
+        /// Key-exchange policy, e.g. `key_exchange = "post-quantum-only"`.
+        #[serde(default)]
+        key_exchange: KeyExchange,
     },
     NativeTls {
         pkcs12path: String,
@@ -99,6 +118,7 @@ impl TlsConfig {
                 capath,
                 certpath,
                 keypath,
+                ..
             } => {
                 let ca = capath.is_none() || capath.as_ref().is_some_and(|v| Path::new(v).exists());
 

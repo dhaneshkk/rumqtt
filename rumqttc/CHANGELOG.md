@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tls_post_quantum` example: TLS 1.3 client restricted to the hybrid post-quantum
+  key exchange `X25519MLKEM768` (no classical fallback).
 ### Changed
 ### Deprecated
 ### Removed
