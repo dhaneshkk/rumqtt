@@ -682,11 +682,7 @@ pub fn matches(topic: &str, filter: &str) -> bool {
     }
 
     // topic has remaining elements and filter's last element isn't "#"
-    if topics.next().is_some() {
-        return false;
-    }
-
-    true
+    topics.next().is_none()
 }
 
 /// Error during serialization and deserialization
