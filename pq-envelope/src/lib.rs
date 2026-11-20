@@ -28,6 +28,13 @@ pub const LABEL: &[u8] = b"pqmqtt/v1/X25519MLKEM768+MLDSA65";
 pub const SIG_LABEL: &[u8] = b"pqmqtt/v1/sig";
 pub const MAX_SKEW_SECS: u64 = 300;
 
+/// MQTT 5 user-property keys describing an envelope (see [`user_properties`]).
+pub const PROP_ALG: &str = "pqe-alg";
+pub const PROP_SENDER: &str = "pqe-sender";
+pub const PROP_SEQ: &str = "pqe-seq";
+/// Value of the [`PROP_ALG`] property for this envelope version.
+pub const ALG: &str = "PQE1/X25519MLKEM768+MLDSA65+A256GCM";
+
 /// Errors while generating keys or sealing.
 #[derive(Debug, thiserror::Error)]
 #[error("crypto error: {0}")]
@@ -44,6 +51,42 @@ pub enum Reject {
     Replay,
     Stale,
     Decrypt,
+    /// MQTT 5 user properties disagree with the (signed) envelope header.
+    PropertyMismatch,
+}
+
+/// MQTT 5 user properties for an envelope: algorithm, sender and sequence number,
+/// copied from its header so subscribers and bridges can route or filter without
+/// parsing the payload.
+///
+/// These are routing hints and are not covered by the envelope's own MAC/signature.
+/// [`Opener::open_with_properties`] rejects any `pqe-*` property that disagrees with the
+/// signed header, so a property a subscriber accepts is as trustworthy as the envelope.
+pub fn user_properties(env: &[u8]) -> std::result::Result<Vec<(String, String)>, Reject> {
+    let (sender, seq) = header_ids(env)?;
+    Ok(vec![
+        (PROP_ALG.into(), ALG.into()),
+        (PROP_SENDER.into(), sender),
+        (PROP_SEQ.into(), seq.to_string()),
+    ])
+}
+
+/// The `pqe-sender` routing hint, if present. Unauthenticated until the envelope is opened.
+pub fn sender_hint(props: &[(String, String)]) -> Option<&str> {
+    props
+        .iter()
+        .find(|(k, _)| k == PROP_SENDER)
+        .map(|(_, v)| v.as_str())
+}
+
+fn header_ids(env: &[u8]) -> std::result::Result<(String, u64), Reject> {
+    let mut r = Rd { b: env, i: 0 };
+    if r.take(4)? != MAGIC {
+        return Err(Reject::Malformed);
+    }
+    let sender = String::from_utf8(r.lp()?.to_vec()).map_err(|_| Reject::Malformed)?;
+    let seq = u64::from_be_bytes(r.take(8)?.try_into().unwrap());
+    Ok((sender, seq))
 }
 
 /// Recipient (subscriber) long-term keys: ML-KEM-768 + X25519.
@@ -190,6 +233,26 @@ impl Opener {
 
     /// Verify, freshness-check and decrypt an envelope received on `topic`.
     /// Returns `(sender, seq, plaintext)`.
+    /// Like [`open`](Self::open), for MQTT 5 messages: every `pqe-*` user property present
+    /// must match the envelope header, otherwise [`Reject::PropertyMismatch`] is returned
+    /// before any key or replay state is touched. Absent properties are allowed;
+    /// other user properties are ignored.
+    pub fn open_with_properties(
+        &mut self,
+        topic: &str,
+        env: &[u8],
+        props: &[(String, String)],
+    ) -> std::result::Result<(String, u64, Vec<u8>), Reject> {
+        let expected = user_properties(env)?;
+        for (k, v) in props.iter().filter(|(k, _)| k.starts_with("pqe-")) {
+            match expected.iter().find(|(ek, _)| ek == k) {
+                Some((_, ev)) if ev == v => {}
+                _ => return Err(Reject::PropertyMismatch),
+            }
+        }
+        self.open(topic, env)
+    }
+
     pub fn open(
         &mut self,
         topic: &str,

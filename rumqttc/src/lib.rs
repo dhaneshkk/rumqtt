@@ -94,6 +94,10 @@
 //! entry to wherever your DNS resolver looks (e.g. `/etc/hosts`) for the bare IP
 //! address and use that name in your code.
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Clippy (Rust >= 1.96) flags the size of public error/event enums that embed
+// whole MQTT packets. Boxing them would change the public API, so these two
+// lints are allowed crate-wide until a breaking release can restructure them.
+#![allow(clippy::result_large_err, clippy::large_enum_variant)]
 
 #[macro_use]
 extern crate log;
@@ -862,14 +866,12 @@ impl std::convert::TryFrom<url::Url> for MqttOptions {
             options.set_clean_session(clean_session);
         }
 
-        if let Some((username, password)) = {
-            match url.username() {
-                "" => None,
-                username => Some((
-                    username.to_owned(),
-                    url.password().unwrap_or_default().to_owned(),
-                )),
-            }
+        if let Some((username, password)) = match url.username() {
+            "" => None,
+            username => Some((
+                username.to_owned(),
+                url.password().unwrap_or_default().to_owned(),
+            )),
         } {
             options.set_credentials(username, password);
         }

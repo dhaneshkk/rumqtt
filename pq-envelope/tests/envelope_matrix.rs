@@ -81,3 +81,32 @@ fn combiner_matches_lean_model() {
     assert_eq!(ikm.len(), 64);
     assert_eq!((&ikm[..32], &ikm[32..]), (&pq[..], &ec[..]));
 }
+
+#[test]
+fn property_mismatch_rejects_before_touching_replay_state() {
+    use rumqtt_pq_envelope::{user_properties, PROP_SENDER};
+    let ops = RecipientKeys::generate().unwrap();
+    let ops_pub = ops.public().unwrap();
+    let mut cam = Sender::generate("edge-cam-01").unwrap();
+    let mut opener = Opener::new(ops);
+    opener.trust("edge-cam-01", cam.public_key_der().unwrap());
+
+    let env = cam.seal(&ops_pub, TOPIC, b"m1").unwrap();
+    let good = user_properties(&env).unwrap();
+    let mut lie = good.clone();
+    lie.iter_mut().find(|(k, _)| k == PROP_SENDER).unwrap().1 = "edge-cam-99".into();
+    assert_eq!(
+        opener.open_with_properties(TOPIC, &env, &lie).unwrap_err(),
+        Reject::PropertyMismatch
+    );
+    // Same envelope still opens: the rejected attempt did not consume seq 1.
+    let extra = [("app".to_string(), "ignored".to_string())];
+    let props: Vec<_> = good.iter().cloned().chain(extra).collect();
+    assert_eq!(
+        opener.open_with_properties(TOPIC, &env, &props).unwrap().2,
+        b"m1"
+    );
+    // No properties at all is allowed.
+    let env2 = cam.seal(&ops_pub, TOPIC, b"m2").unwrap();
+    assert_eq!(opener.open_with_properties(TOPIC, &env2, &[]).unwrap().1, 2);
+}

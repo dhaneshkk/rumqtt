@@ -36,6 +36,8 @@ impl Scheduler {
         let tracker = self.trackers.get_mut(id)?;
 
         // drain will clear all DataRequest but will keep the allocated memory of our VecDeque.
+        // Intentional: `mem::take` (clippy's suggestion) would hand the buffer away instead.
+        #[allow(clippy::drain_collect)]
         let data_requests = tracker.data_requests.drain(..).collect();
 
         // Implicitly reschedule the connection. Router will take care of explicitly pausing if

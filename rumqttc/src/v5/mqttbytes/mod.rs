@@ -8,18 +8,13 @@ pub mod v5;
 
 /// Quality of service
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Default)]
 #[allow(clippy::enum_variant_names)]
 pub enum QoS {
+    #[default]
     AtMostOnce = 0,
     AtLeastOnce = 1,
     ExactlyOnce = 2,
-}
-
-impl Default for QoS {
-    fn default() -> Self {
-        Self::AtMostOnce
-    }
 }
 
 /// Maps a number to QoS
@@ -40,11 +35,7 @@ pub fn has_wildcards(s: &str) -> bool {
 /// Checks if a topic is valid
 pub fn valid_topic(topic: &str) -> bool {
     // topic can't contain wildcards
-    if topic.contains('+') || topic.contains('#') {
-        return false;
-    }
-
-    true
+    !(topic.contains('+') || topic.contains('#'))
 }
 
 /// Checks if the filter is valid
@@ -122,11 +113,7 @@ pub fn matches(topic: &str, filter: &str) -> bool {
     }
 
     // topic has remaining elements and filter's last element isn't "#"
-    if topics.next().is_some() {
-        return false;
-    }
-
-    true
+    topics.next().is_none()
 }
 
 /// Error during serialization and deserialization

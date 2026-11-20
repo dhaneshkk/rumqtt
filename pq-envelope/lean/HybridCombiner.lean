@@ -22,6 +22,9 @@ Models the combiner used in BOTH layers:
 7. `no_entropy_loss_pq`  : mapping a duplicate-free set of PQ secrets through the
    combiner (any fixed classical secret) stays duplicate-free, so the key
    space is no smaller than the PQ secret space.
+8. `props_consistent_sound` / `props_consistent_nil` : the MQTT 5 user-property
+   check (`Opener::open_with_properties`) only passes if every `pqe-*` property
+   received is exactly one the signed header produced; no properties always passes.
 
 ## Assumed, NOT proven here (computational)
 IND-CCA security of the hybrid needs: ML-KEM-768 IND-CCA2 (FIPS 203),
@@ -95,6 +98,22 @@ theorem no_entropy_loss_pq (ec : Secret32) (S : List Secret32) (hS : S.Nodup) :
   unfold List.Nodup at *
   exact List.Pairwise.map _ (fun a b hab h => hab (combine_inj_pq ec h)) hS
 
+/-- MQTT 5 user-property check: every property whose key satisfies `isPqe` must
+appear verbatim among the properties derived from the signed envelope header. -/
+def propsConsistent (isPqe : String → Bool) (expected props : List (String × String)) : Bool :=
+  props.all (fun kv => !isPqe kv.1 || expected.contains kv)
+
+theorem props_consistent_sound (isPqe : String → Bool) (expected props : List (String × String))
+    (h : propsConsistent isPqe expected props = true) :
+    ∀ kv ∈ props, isPqe kv.1 = true → kv ∈ expected := by
+  intro kv hmem hp
+  have hall := List.all_eq_true.mp h kv hmem
+  simp [hp] at hall
+  exact hall
+
+theorem props_consistent_nil (isPqe : String → Bool) (expected : List (String × String)) :
+    propsConsistent isPqe expected [] = true := rfl
+
 /-- Concrete sanity check, evaluated by the kernel. -/
 example : (combine ⟨List.replicate 32 1, by simp⟩ ⟨List.replicate 32 2, by simp⟩).length = 64 :=
   combine_length _ _
@@ -107,3 +126,4 @@ end PqMqtt
 #print axioms PqMqtt.kdf_robust_ec
 #print axioms PqMqtt.kdf_binds_info
 #print axioms PqMqtt.no_entropy_loss_pq
+#print axioms PqMqtt.props_consistent_sound

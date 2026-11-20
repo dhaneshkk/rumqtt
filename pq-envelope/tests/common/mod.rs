@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 //! Shared test helpers: attack-case generator and Matthews Correlation Coefficient.
 
+pub mod net;
+
 use rumqtt_pq_envelope::{now, RecipientKeys, RecipientPublic, Sender};
 
 pub const TOPIC: &str = "vg360/site1/telemetry";

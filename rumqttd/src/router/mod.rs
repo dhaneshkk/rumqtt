@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    fmt,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -196,58 +193,6 @@ pub struct DataRequest {
     max_count: usize,
     pub(crate) forward_retained: bool,
     pub(crate) group: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcksRequest;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Request {
-    Data(DataRequest),
-    Ack(AcksRequest),
-}
-
-/// A single message from connection to router
-pub struct Message {
-    /// Log to sweep
-    pub topic: String,
-    /// Qos of the topic
-    pub _qos: u8,
-    /// Reply data chain
-    pub payload: Bytes,
-}
-
-impl fmt::Debug for Message {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Topic = {:?}, Payload size = {}",
-            self.topic,
-            self.payload.len()
-        )
-    }
-}
-
-/// A batch of messages from connection to router
-pub struct Data {
-    /// (segment, offset) tuples per replica (1 native and 2 replicas)
-    pub offset: (u64, u64),
-    /// Payload size
-    pub size: usize,
-    /// Reply data chain
-    pub payload: Vec<Publish>,
-}
-
-impl fmt::Debug for Data {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Cursors = {:?}, Payload size = {}, Payload count = {}",
-            self.offset,
-            self.size,
-            self.payload.len()
-        )
-    }
 }
 
 // #[derive(Debug, Clone)]
