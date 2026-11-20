@@ -657,14 +657,12 @@ impl std::convert::TryFrom<url::Url> for MqttOptions {
             options.set_clean_start(clean_start);
         }
 
-        if let Some((username, password)) = {
-            match url.username() {
-                "" => None,
-                username => Some((
-                    username.to_owned(),
-                    url.password().unwrap_or_default().to_owned(),
-                )),
-            }
+        if let Some((username, password)) = match url.username() {
+            "" => None,
+            username => Some((
+                username.to_owned(),
+                url.password().unwrap_or_default().to_owned(),
+            )),
         } {
             options.set_credentials(username, password);
         }

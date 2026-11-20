@@ -6,11 +6,7 @@ pub fn has_wildcards(s: &str) -> bool {
 /// Checks if a topic is valid
 pub fn valid_topic(topic: &str) -> bool {
     // topic can't contain wildcards
-    if topic.contains('+') || topic.contains('#') {
-        return false;
-    }
-
-    true
+    !(topic.contains('+') || topic.contains('#'))
 }
 
 /// Checks if the filter is valid
@@ -88,11 +84,7 @@ pub fn matches(topic: &str, filter: &str) -> bool {
     }
 
     // topic has remaining elements and filter's last element isn't "#"
-    if topics.next().is_some() {
-        return false;
-    }
-
-    true
+    topics.next().is_none()
 }
 
 #[cfg(test)]

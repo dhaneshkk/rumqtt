@@ -63,7 +63,7 @@ jobs:
       #     args: --verbose --all-targets -p benchmarks
 
       - name: Check rumqttc and rumqttd
-        run: cargo hack clippy --verbose --each-feature --no-dev-deps --optional-deps url -p rumqttc -p rumqttd
+        run: cargo hack clippy --verbose --keep-going --each-feature --no-dev-deps --optional-deps url -p rumqttc -p rumqttd
 
       - name: Check docs
         if: ${{ matrix.os != 'windows-latest' }}
