@@ -13,6 +13,8 @@ authors.workspace = true
 [dependencies]
 aws-lc-rs = "1.19"
 thiserror = "1.0.57"
+zstd = "0.13"
+hpke = { version = "0.15", default-features = false, features = ["alloc", "getrandom", "mlkem", "x25519", "aes", "hkdfsha2"] }
 
 [dev-dependencies]
 rumqttd = { path = "../rumqttd", default-features = false, features = ["use-rustls", "verify-client-cert"] }
