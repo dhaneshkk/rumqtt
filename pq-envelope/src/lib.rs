@@ -1,44 +1,95 @@
-//! Layer 2: end-to-end post-quantum envelope for MQTT payloads.
+//! Layer 2: end-to-end post-quantum protection for MQTT payloads.
 //!
-//! Confidentiality: hybrid KEM = ML-KEM-768 (FIPS 203) + X25519, combined as
-//!   ikm  = ss_mlkem || ss_x25519            (same order as TLS X25519MLKEM768)
-//!   info = LABEL || kem_ct || eph_pub || topic || sender || seq
-//!   key  = HKDF-SHA256(salt = LABEL, ikm, info) -> AES-256-GCM
-//! Authenticity: ML-DSA-65 (FIPS 204) over topic + every byte before the signature.
-//! Replay: per-sender monotonic sequence number + timestamp skew window.
+//! Public-key encryption is HPKE (RFC 9180) with the X-Wing hybrid KEM
+//! (ML-KEM-768 + X25519), HKDF-SHA256 and AES-256-GCM: see [`suite`]. Senders sign with
+//! ML-DSA-65 (FIPS 204). Two modes:
 //!
-//! The broker only ever sees ciphertext; the Lean4 spec (`lean/HybridCombiner.lean`)
-//! states and proves the structural properties of the combiner used here.
-//! The envelope is a self-contained binary payload, so it works over MQTT 3.1.1 and 5.
+//! * **Per-message envelope** ([`Sender::seal`] / [`Opener::open`]): every message is a
+//!   self-contained HPKE ciphertext + ML-DSA-65 signature (~4.5 KB overhead).
+//! * **Session mode** ([`session`]): one signed HPKE handshake per session, wrapping a
+//!   group key for one or more recipients, then ~45-byte frames with bucket padding and
+//!   optional zstd.
+//!
+//! Keys are bound to identities by the certificates in [`keys`]. The broker only ever
+//! sees ciphertext. `lean/HybridCombiner.lean` states and proves the structural
+//! properties relied on here. Both formats are self-contained binary payloads, so they
+//! work over MQTT 3.1.1 and 5.
+
+pub mod keys;
+pub mod session;
+pub mod suite;
 
 use aws_lc_rs::{
-    aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN},
-    agreement::{self, PrivateKey, UnparsedPublicKey, X25519},
     encoding::AsDer,
-    hkdf::{Salt, HKDF_SHA256},
-    kem::{Ciphertext, DecapsulationKey, EncapsulationKey, ML_KEM_768},
-    rand::{SecureRandom, SystemRandom},
     signature::{self as sig, KeyPair, PqdsaKeyPair, ML_DSA_65, ML_DSA_65_SIGNING},
 };
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MAGIC: &[u8; 4] = b"PQE1";
-pub const LABEL: &[u8] = b"pqmqtt/v1/X25519MLKEM768+MLDSA65";
-pub const SIG_LABEL: &[u8] = b"pqmqtt/v1/sig";
+pub const MAGIC: &[u8; 4] = b"PQE2";
+pub const LABEL: &[u8] = b"pqmqtt/v2/envelope";
+pub const SIG_LABEL: &[u8] = b"pqmqtt/v2/sig";
 pub const MAX_SKEW_SECS: u64 = 300;
+/// Default maximum envelope age accepted by [`Opener`] (7 days).
+pub const DEFAULT_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
+const STATE_MAGIC: &[u8; 4] = b"PQES";
+
+/// Timestamp policy for [`Opener`].
+///
+/// Replay protection comes from per-sender sequence numbers (persist them with
+/// [`Opener::export_state`] / [`Opener::import_state`]), not from timestamps, so the
+/// default policy accepts delayed delivery: retained messages, offline-session queues and
+/// store-and-forward links. Only clearly future-dated envelopes (clock skew) and
+/// envelopes older than `max_age` are rejected as [`Reject::Stale`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Freshness {
+    /// Reject envelopes timestamped more than this many seconds in the future.
+    pub max_future_skew: u64,
+    /// Reject envelopes older than this many seconds; `None` disables the age limit.
+    /// If replay state is *not* persisted, this bounds how far back a replay after a
+    /// subscriber restart can reach.
+    pub max_age: Option<u64>,
+}
+
+impl Default for Freshness {
+    fn default() -> Self {
+        Self {
+            max_future_skew: MAX_SKEW_SECS,
+            max_age: Some(DEFAULT_MAX_AGE_SECS),
+        }
+    }
+}
+
+impl Freshness {
+    /// The original ±300 s window: rejects any delayed delivery.
+    pub const STRICT: Freshness = Freshness {
+        max_future_skew: MAX_SKEW_SECS,
+        max_age: Some(MAX_SKEW_SECS),
+    };
+    /// No age limit (future skew still checked). Use together with persisted state.
+    pub const UNBOUNDED: Freshness = Freshness {
+        max_future_skew: MAX_SKEW_SECS,
+        max_age: None,
+    };
+
+    /// `true` if an envelope stamped `ts` is acceptable at time `now`.
+    pub fn accepts(&self, ts: u64, now: u64) -> bool {
+        ts <= now.saturating_add(self.max_future_skew)
+            && self.max_age.is_none_or(|a| now.saturating_sub(ts) <= a)
+    }
+}
 
 /// MQTT 5 user-property keys describing an envelope (see [`user_properties`]).
 pub const PROP_ALG: &str = "pqe-alg";
 pub const PROP_SENDER: &str = "pqe-sender";
 pub const PROP_SEQ: &str = "pqe-seq";
 /// Value of the [`PROP_ALG`] property for this envelope version.
-pub const ALG: &str = "PQE1/X25519MLKEM768+MLDSA65+A256GCM";
+pub const ALG: &str = "PQE2/HPKE-XWing-HKDFSHA256-A256GCM+MLDSA65";
 
 /// Errors while generating keys or sealing.
 #[derive(Debug, thiserror::Error)]
 #[error("crypto error: {0}")]
-pub struct Error(String);
+pub struct Error(pub(crate) String);
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -53,6 +104,18 @@ pub enum Reject {
     Decrypt,
     /// MQTT 5 user properties disagree with the (signed) envelope header.
     PropertyMismatch,
+    /// Session mode: frame for a session this receiver has no key for.
+    UnknownSession,
+    /// Session mode: handshake older than (or conflicting with) the last accepted one.
+    StaleSession,
+    /// Session mode: handshake does not wrap the session key for this recipient.
+    NotARecipient,
+    /// Session mode: frame needs a zstd dictionary this receiver does not have.
+    UnknownDictionary,
+    /// Session mode: zstd decompression failed or exceeded `max_plaintext`.
+    Decompress,
+    /// Session mode: plaintext larger than `max_plaintext`.
+    Oversize,
 }
 
 /// MQTT 5 user properties for an envelope: algorithm, sender and sequence number,
@@ -89,43 +152,47 @@ fn header_ids(env: &[u8]) -> std::result::Result<(String, u64), Reject> {
     Ok((sender, seq))
 }
 
-/// Recipient (subscriber) long-term keys: ML-KEM-768 + X25519.
+/// Recipient (subscriber) long-term keys: an X-Wing (ML-KEM-768 + X25519) HPKE key pair.
 pub struct RecipientKeys {
-    kem: DecapsulationKey,
-    x25519: PrivateKey,
+    pub(crate) sk: suite::Sk,
+    pub(crate) pk: suite::Pk,
 }
 
-/// Public half, distributed to publishers (e.g. provisioned at commissioning).
-#[derive(Clone)]
+/// Public half, distributed to publishers (ideally inside a [`keys::KeyCert`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecipientPublic {
-    pub kem_ek: Vec<u8>,
-    pub x25519_pub: Vec<u8>,
+    /// X-Wing public key, 1216 bytes.
+    pub xwing_pub: Vec<u8>,
+}
+
+impl RecipientPublic {
+    pub fn from_bytes(b: &[u8]) -> Result<Self> {
+        suite::pk_from(b).ok_or_else(|| Error("invalid X-Wing public key".into()))?;
+        Ok(Self {
+            xwing_pub: b.to_vec(),
+        })
+    }
 }
 
 impl RecipientKeys {
     pub fn generate() -> Result<Self> {
-        Ok(Self {
-            kem: DecapsulationKey::generate(&ML_KEM_768).map_err(e)?,
-            x25519: PrivateKey::generate(&X25519).map_err(e)?,
-        })
+        let (sk, pk) = suite::gen();
+        Ok(Self { sk, pk })
     }
     pub fn public(&self) -> Result<RecipientPublic> {
         Ok(RecipientPublic {
-            kem_ek: self
-                .kem
-                .encapsulation_key()
-                .map_err(e)?
-                .key_bytes()
-                .map_err(e)?
-                .as_ref()
-                .to_vec(),
-            x25519_pub: self
-                .x25519
-                .compute_public_key()
-                .map_err(e)?
-                .as_ref()
-                .to_vec(),
+            xwing_pub: suite::pk_bytes(&self.pk),
         })
+    }
+    /// 32-byte private seed, for storage (protect it like any private key).
+    pub fn to_secret_bytes(&self) -> Vec<u8> {
+        suite::sk_bytes(&self.sk)
+    }
+    /// Restore keys saved with [`to_secret_bytes`](Self::to_secret_bytes).
+    pub fn from_secret_bytes(b: &[u8]) -> Result<Self> {
+        let sk = suite::sk_from(b).ok_or_else(|| Error("invalid X-Wing private key".into()))?;
+        let pk = suite::pk_of(&sk);
+        Ok(Self { sk, pk })
     }
 }
 
@@ -147,6 +214,28 @@ impl Sender {
     pub fn public_key_der(&self) -> Result<Vec<u8>> {
         Ok(self.key.public_key().as_der().map_err(e)?.as_ref().to_vec())
     }
+    /// PKCS#8 encoding of the ML-DSA-65 signing key, for storage.
+    pub fn to_pkcs8(&self) -> Result<Vec<u8>> {
+        Ok(self.key.to_pkcs8v1().map_err(e)?.as_ref().to_vec())
+    }
+    /// Restore a sender from [`to_pkcs8`](Self::to_pkcs8).
+    pub fn from_pkcs8(id: &str, der: &[u8]) -> Result<Self> {
+        Ok(Self {
+            id: id.into(),
+            key: PqdsaKeyPair::from_pkcs8(&ML_DSA_65_SIGNING, der).map_err(e)?,
+            seq: 0,
+        })
+    }
+    /// Start sequence numbers at `epoch << 32`. Persist `epoch` and increase it on every
+    /// restart, so a rebooted publisher's messages are never mistaken for replays.
+    pub fn with_epoch(mut self, epoch: u32) -> Self {
+        self.seq = (epoch as u64) << 32;
+        self
+    }
+    /// Last sequence number used.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
 
     /// Seal `plaintext` for `to`, bound to `topic`.
     pub fn seal(&mut self, to: &RecipientPublic, topic: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -164,47 +253,20 @@ impl Sender {
         seq: u64,
         ts: u64,
     ) -> Result<Vec<u8>> {
-        // 1. ML-KEM-768 encapsulation to the recipient.
-        let ek = EncapsulationKey::new(&ML_KEM_768, &to.kem_ek).map_err(e)?;
-        let (kem_ct, ss_pq) = ek.encapsulate().map_err(e)?;
-        // 2. Ephemeral X25519 against the recipient's static key.
-        let eph = PrivateKey::generate(&X25519).map_err(e)?;
-        let eph_pub = eph.compute_public_key().map_err(e)?.as_ref().to_vec();
-        let peer = UnparsedPublicKey::new(&X25519, &to.x25519_pub);
-        let ss_ec = agreement::agree(&eph, peer, Error("x25519".into()), |s| Ok(s.to_vec()))?;
-
+        let pk =
+            suite::pk_from(&to.xwing_pub).ok_or_else(|| Error("invalid recipient key".into()))?;
         // Header (authenticated, not encrypted).
         let mut w = Vec::with_capacity(5000);
         w.extend_from_slice(MAGIC);
         put(&mut w, self.id.as_bytes());
         w.extend_from_slice(&seq.to_be_bytes());
         w.extend_from_slice(&ts.to_be_bytes());
-        put(&mut w, kem_ct.as_ref());
-        put(&mut w, &eph_pub);
-
-        // 3. Combiner -> AEAD key.
-        let key = derive_key(
-            ss_pq.as_ref(),
-            &ss_ec,
-            kem_ct.as_ref(),
-            &eph_pub,
-            topic,
-            &self.id,
-            seq,
-        )?;
-        let mut nonce = [0u8; NONCE_LEN];
-        SystemRandom::new().fill(&mut nonce).map_err(e)?;
-        let mut body = pt.to_vec();
-        key.seal_in_place_append_tag(
-            Nonce::assume_unique_for_key(nonce),
-            Aad::from(aad(topic, &w)),
-            &mut body,
-        )
-        .map_err(e)?;
-        w.extend_from_slice(&nonce);
-        put(&mut w, &body);
-
-        // 4. ML-DSA-65 signature over topic || everything so far.
+        // HPKE single-shot seal to the recipient; info binds topic, sender and seq.
+        let (enc, ct) =
+            suite::seal(&pk, &info(topic, &self.id, seq), &aad(topic, &w), pt).map_err(e)?;
+        put(&mut w, &enc);
+        put(&mut w, &ct);
+        // ML-DSA-65 signature over topic || everything so far.
         let mut s = vec![0u8; ML_DSA_65_SIGNING.signature_len()];
         let n = self.key.sign(&sig_msg(topic, &w), &mut s).map_err(e)?;
         put(&mut w, &s[..n]);
@@ -217,6 +279,7 @@ pub struct Opener {
     keys: RecipientKeys,
     senders: HashMap<String, Vec<u8>>, // sender id -> ML-DSA-65 public key (DER SPKI)
     last_seq: HashMap<String, u64>,
+    freshness: Freshness,
 }
 
 impl Opener {
@@ -225,14 +288,63 @@ impl Opener {
             keys,
             senders: HashMap::new(),
             last_seq: HashMap::new(),
+            freshness: Freshness::default(),
         }
+    }
+    /// Replace the timestamp policy (default: [`Freshness::default`]).
+    pub fn set_freshness(&mut self, f: Freshness) {
+        self.freshness = f;
+    }
+    pub fn freshness(&self) -> Freshness {
+        self.freshness
+    }
+
+    /// Per-sender highest accepted sequence numbers, to persist (e.g. on every write or
+    /// periodically) so that a restarted subscriber keeps rejecting replays.
+    pub fn export_state(&self) -> Vec<u8> {
+        let mut w = STATE_MAGIC.to_vec();
+        w.extend_from_slice(&(self.last_seq.len() as u32).to_be_bytes());
+        for (id, seq) in &self.last_seq {
+            put(&mut w, id.as_bytes());
+            w.extend_from_slice(&seq.to_be_bytes());
+        }
+        w
+    }
+
+    /// Restore state saved by [`export_state`](Self::export_state). Existing entries are
+    /// only ever raised, never lowered.
+    pub fn import_state(&mut self, state: &[u8]) -> std::result::Result<(), Reject> {
+        let mut r = Rd { b: state, i: 0 };
+        if r.take(4)? != STATE_MAGIC {
+            return Err(Reject::Malformed);
+        }
+        let n = u32::from_be_bytes(r.take(4)?.try_into().unwrap());
+        let mut parsed = Vec::new();
+        for _ in 0..n {
+            let id = String::from_utf8(r.lp()?.to_vec()).map_err(|_| Reject::Malformed)?;
+            let seq = u64::from_be_bytes(r.take(8)?.try_into().unwrap());
+            parsed.push((id, seq));
+        }
+        if r.i != state.len() {
+            return Err(Reject::Malformed);
+        }
+        for (id, seq) in parsed {
+            let e = self.last_seq.entry(id).or_insert(0);
+            *e = (*e).max(seq);
+        }
+        Ok(())
     }
     pub fn trust(&mut self, id: &str, mldsa_pub_der: Vec<u8>) {
         self.senders.insert(id.into(), mldsa_pub_der);
     }
 
-    /// Verify, freshness-check and decrypt an envelope received on `topic`.
-    /// Returns `(sender, seq, plaintext)`.
+    /// Replace the trusted senders with the currently valid sender certificates of `dir`.
+    /// Call again after installing certificates or revocation lists (or periodically, to
+    /// drop expired keys).
+    pub fn sync_trust(&mut self, dir: &keys::KeyDirectory) {
+        self.senders = dir.senders().into_iter().collect();
+    }
+
     /// Like [`open`](Self::open), for MQTT 5 messages: every `pqe-*` user property present
     /// must match the envelope header, otherwise [`Reject::PropertyMismatch`] is returned
     /// before any key or replay state is touched. Absent properties are allowed;
@@ -253,6 +365,8 @@ impl Opener {
         self.open(topic, env)
     }
 
+    /// Verify, freshness-check and decrypt an envelope received on `topic`.
+    /// Returns `(sender, seq, plaintext)`.
     pub fn open(
         &mut self,
         topic: &str,
@@ -265,11 +379,9 @@ impl Opener {
         let sender = String::from_utf8(r.lp()?.to_vec()).map_err(|_| Reject::Malformed)?;
         let seq = u64::from_be_bytes(r.take(8)?.try_into().unwrap());
         let ts = u64::from_be_bytes(r.take(8)?.try_into().unwrap());
-        let kem_ct = r.lp()?.to_vec();
-        let eph_pub = r.lp()?.to_vec();
         let header_end = r.i;
-        let nonce: [u8; NONCE_LEN] = r.take(NONCE_LEN)?.try_into().unwrap();
-        let body = r.lp()?.to_vec();
+        let enc = r.lp()?;
+        let ct = r.lp()?;
         let signed_end = r.i;
         let signature = r.lp()?;
         if r.i != env.len() {
@@ -285,68 +397,30 @@ impl Opener {
         if seq <= *self.last_seq.get(&sender).unwrap_or(&0) {
             return Err(Reject::Replay);
         }
-        if now().abs_diff(ts) > MAX_SKEW_SECS {
+        if !self.freshness.accepts(ts, now()) {
             return Err(Reject::Stale);
         }
 
-        // Decapsulate + combine.
-        let ss_pq = self
-            .keys
-            .kem
-            .decapsulate(Ciphertext::from(kem_ct.as_slice()))
-            .map_err(|_| Reject::Decrypt)?;
-        let peer = UnparsedPublicKey::new(&X25519, &eph_pub);
-        let ss_ec = agreement::agree(&self.keys.x25519, peer, Reject::Decrypt, |s| Ok(s.to_vec()))?;
-        let key = derive_key(
-            ss_pq.as_ref(),
-            &ss_ec,
-            &kem_ct,
-            &eph_pub,
-            topic,
-            &sender,
-            seq,
+        let pt = suite::open(
+            &self.keys.sk,
+            enc,
+            &info(topic, &sender, seq),
+            &aad(topic, &env[..header_end]),
+            ct,
         )
-        .map_err(|_| Reject::Decrypt)?;
-        let mut buf = body;
-        let pt = key
-            .open_in_place(
-                Nonce::assume_unique_for_key(nonce),
-                Aad::from(aad(topic, &env[..header_end])),
-                &mut buf,
-            )
-            .map_err(|_| Reject::Decrypt)?
-            .to_vec();
+        .ok_or(Reject::Decrypt)?;
         self.last_seq.insert(sender.clone(), seq);
         Ok((sender, seq, pt))
     }
 }
 
-/// The hybrid combiner (mirrors `combine` in lean/HybridCombiner.lean).
-pub fn combiner_ikm(ss_pq: &[u8], ss_ec: &[u8]) -> Vec<u8> {
-    assert_eq!(ss_pq.len(), 32);
-    assert_eq!(ss_ec.len(), 32);
-    [ss_pq, ss_ec].concat()
-}
-
-fn derive_key(
-    ss_pq: &[u8],
-    ss_ec: &[u8],
-    kem_ct: &[u8],
-    eph: &[u8],
-    topic: &str,
-    sender: &str,
-    seq: u64,
-) -> Result<LessSafeKey> {
-    let ikm = combiner_ikm(ss_pq, ss_ec);
-    let mut info = Vec::new();
-    for part in [LABEL, kem_ct, eph, topic.as_bytes(), sender.as_bytes()] {
-        put(&mut info, part);
-    }
-    info.extend_from_slice(&seq.to_be_bytes());
-    let prk = Salt::new(HKDF_SHA256, LABEL).extract(&ikm);
-    let info_parts: [&[u8]; 1] = [&info];
-    let okm = prk.expand(&info_parts, &AES_256_GCM).map_err(e)?;
-    Ok(LessSafeKey::new(UnboundKey::from(okm)))
+fn info(topic: &str, sender: &str, seq: u64) -> Vec<u8> {
+    let mut i = Vec::new();
+    put(&mut i, LABEL);
+    put(&mut i, topic.as_bytes());
+    put(&mut i, sender.as_bytes());
+    i.extend_from_slice(&seq.to_be_bytes());
+    i
 }
 
 fn aad(topic: &str, header: &[u8]) -> Vec<u8> {

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Post-quantum authentication for rustls listeners: new `signatures` option in the `tls`
+  section (`"default"` | `"post-quantum-only"`). `"post-quantum-only"` accepts only ML-DSA
+  (FIPS 204) signatures for certificate chains and CertificateVerify, and refuses to start
+  the listener unless the server key is ML-DSA.
+- Bridge: `[bridge.transport.tls]` accepts the same `key_exchange` and `signatures`
+  options for the bridge's outgoing TLS connection; with `signatures = "post-quantum-only"`
+  the remote broker's chain must be ML-DSA and so must the bridge's client key.
+- TLS listeners validate their TLS configuration before binding, so a misconfigured
+  listener fails to start instead of accepting connections it cannot complete.
 - Post-quantum TLS key exchange for rustls listeners: new `key_exchange` option in the `tls`
   section (`"default"` | `"prefer-post-quantum"` | `"post-quantum-only"`), backed by the hybrid
   `X25519MLKEM768` group (ML-KEM-768 + X25519, RFC 10024) from aws-lc-rs.
@@ -15,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Debug log of the negotiated key-exchange group after each TLS handshake.
 
 ### Changed
+- Require `rustls >= 0.23.46` with `use-rustls` (ML-DSA signing keys and verification).
+- `TlsConfig::Rustls` gains a `signatures: SignaturePolicy` field (serde default `Default`).
+- `Transport::Tls` (bridge) gains `key_exchange` and `signatures` fields (serde defaults);
+  `link::bridge::tls_connect` takes a `TlsPolicy` argument.
 - Upgrade `tokio-rustls` to 0.26 (rustls 0.23, aws-lc-rs provider) and `rustls-webpki` to 0.103.
 - `TlsConfig::Rustls` gains a `key_exchange: KeyExchange` field (serde default `Default`);
   code that builds this variant with a struct literal must add the field.

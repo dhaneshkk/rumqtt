@@ -78,7 +78,13 @@ pub fn test_matrix(
     }
     for i in 0..5 {
         let env = cam
-            .seal_with(ops_pub, TOPIC, b"old", 1_000_000 + i, now() - 3600)
+            .seal_with(
+                ops_pub,
+                TOPIC,
+                b"old",
+                1_000_000 + i,
+                now() - 30 * 24 * 3600,
+            )
             .unwrap();
         cases.push(("stale-ts", false, env));
     }

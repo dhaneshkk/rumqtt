@@ -175,11 +175,20 @@ async fn network_connect<P: Protocol>(
             ))
         }
         #[cfg(feature = "use-rustls")]
-        Transport::Tls { ca, client_auth } => {
+        Transport::Tls {
+            ca,
+            client_auth,
+            key_exchange,
+            signatures,
+        } => {
             let tcp_stream = TcpStream::connect(addr).await?;
             // addr should be in format host:port
             let host = addr.split(':').next().unwrap();
-            let socket = tls_connect(host, &ca, client_auth, tcp_stream).await?;
+            let policy = TlsPolicy {
+                key_exchange: *key_exchange,
+                signatures: *signatures,
+            };
+            let socket = tls_connect(host, &ca, client_auth, policy, tcp_stream).await?;
             Ok(Network::new(
                 Box::new(socket),
                 config.connections.max_payload_size,
@@ -194,13 +203,25 @@ async fn network_connect<P: Protocol>(
     }
 }
 
+/// Post-quantum policy for the bridge's outgoing TLS connection.
+#[cfg(feature = "use-rustls")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TlsPolicy {
+    pub key_exchange: crate::KeyExchange,
+    pub signatures: crate::SignaturePolicy,
+}
+
 #[cfg(feature = "use-rustls")]
 pub async fn tls_connect<P: AsRef<Path>>(
     host: &str,
     ca_file: P,
     client_auth_opt: &Option<ClientAuth>,
+    policy: TlsPolicy,
     tcp: TcpStream,
 ) -> Result<Box<dyn N>, BridgeError> {
+    use crate::server::tls::{crypto_provider, post_quantum_signatures, PQ_SCHEMES};
+    use crate::{KeyExchange, SignaturePolicy};
+
     let mut root_cert_store = RootCertStore::empty();
 
     for cert in rustls_pemfile::certs(&mut BufReader::new(Cursor::new(fs::read(ca_file)?))) {
@@ -211,7 +232,20 @@ pub async fn tls_connect<P: AsRef<Path>>(
         return Err(BridgeError::NoValidCertInChain);
     }
 
-    let config = ClientConfig::builder().with_root_certificates(root_cert_store);
+    let mut provider = crypto_provider(policy.key_exchange);
+    let pq_auth = policy.signatures == SignaturePolicy::PostQuantumOnly;
+    if pq_auth {
+        provider.signature_verification_algorithms = post_quantum_signatures();
+    }
+    let versions: &[&'static tokio_rustls::rustls::SupportedProtocolVersion] =
+        match policy.key_exchange {
+            KeyExchange::PostQuantumOnly => &[&tokio_rustls::rustls::version::TLS13],
+            _ => tokio_rustls::rustls::DEFAULT_VERSIONS,
+        };
+    let provider = Arc::new(provider);
+    let config = ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(versions)?
+        .with_root_certificates(root_cert_store);
 
     let config = if let Some(ClientAuth {
         certs: certs_path,
@@ -221,7 +255,7 @@ pub async fn tls_connect<P: AsRef<Path>>(
         let certs = rustls_pemfile::certs(&mut BufReader::new(Cursor::new(fs::read(certs_path)?)))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let key = loop {
+        let key: tokio_rustls::rustls::pki_types::PrivateKeyDer<'static> = loop {
             match rustls_pemfile::read_one(&mut BufReader::new(Cursor::new(fs::read(key_path)?)))? {
                 Some(Item::Pkcs1Key(key)) => break key.into(),
                 Some(Item::Pkcs8Key(key)) => break key.into(),
@@ -231,6 +265,14 @@ pub async fn tls_connect<P: AsRef<Path>>(
             };
         };
 
+        if pq_auth {
+            let signing_key = provider.key_provider.load_private_key(key.clone_key())?;
+            if signing_key.choose_scheme(PQ_SCHEMES).is_none() {
+                return Err(BridgeError::NotPostQuantumKey(
+                    key_path.display().to_string(),
+                ));
+            }
+        }
         config.with_client_auth_cert(certs, key)?
     } else {
         config.with_no_client_auth()
@@ -238,7 +280,12 @@ pub async fn tls_connect<P: AsRef<Path>>(
 
     let connector = TlsConnector::from(Arc::new(config));
     let domain = ServerName::try_from(host)?.to_owned();
-    Ok(Box::new(connector.connect(domain, tcp).await?))
+    let stream = connector.connect(domain, tcp).await?;
+    tracing::debug!(
+        kx_group = ?stream.get_ref().1.negotiated_key_exchange_group().map(|g| g.name()),
+        "bridge TLS handshake complete"
+    );
+    Ok(Box::new(stream))
 }
 
 async fn network_init<P: Protocol>(
@@ -316,6 +363,9 @@ pub enum BridgeError {
     InvalidQos,
     #[error("Invalid packet")]
     InvalidPacket,
+    #[cfg(feature = "use-rustls")]
+    #[error("signatures = \"post-quantum-only\" requires an ML-DSA client key ({0})")]
+    NotPostQuantumKey(String),
     #[cfg(feature = "use-rustls")]
     #[error("Invalid trust_anchor")]
     NoValidCertInChain,

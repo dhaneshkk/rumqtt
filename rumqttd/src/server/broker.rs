@@ -380,6 +380,13 @@ impl<P: Protocol + Clone + Send + 'static> Server<P> {
     }
 
     pub async fn start(&mut self, link_type: LinkType) -> Result<(), Error> {
+        // Validate the TLS configuration once before binding, so a misconfigured listener
+        // (e.g. `signatures = "post-quantum-only"` with a classical server key) fails to
+        // start instead of accepting TCP connections it can never complete.
+        #[cfg(any(feature = "use-rustls", feature = "use-native-tls"))]
+        if let Some(c) = &self.config.tls {
+            TLSAcceptor::new(c)?;
+        }
         let listener = TcpListener::bind(&self.config.listen).await?;
         let delay = Duration::from_millis(self.config.next_connection_delay_ms);
         let mut count: usize = 0;

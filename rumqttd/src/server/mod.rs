@@ -2,7 +2,7 @@
 
 mod broker;
 #[cfg(any(feature = "use-rustls", feature = "use-native-tls"))]
-mod tls;
+pub(crate) mod tls;
 
 pub use broker::{Broker, LinkType, Server};
 
